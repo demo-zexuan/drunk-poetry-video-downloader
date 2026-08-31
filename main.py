@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -78,7 +79,7 @@ def make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--format", dest="format_", default=None,
-        help="yt-dlp 格式表达式; 默认: 有 ffmpeg 时用 bestvideo*+bestaudio/best, 否则 best",
+        help="yt-dlp 格式表达式; 默认: 有 ffmpeg 时优先 H.264+AAC(mp4 兼容)组合, 否则 best",
     )
     parser.add_argument("--limit", type=int, default=None,
                         help="只下载最新 N 个视频(频道列表按新到旧排序)")
@@ -98,11 +99,23 @@ def make_parser() -> argparse.ArgumentParser:
 
 
 def resolve_format(requested: str | None) -> str:
-    """确定默认输出格式: 有 ffmpeg 时合并最高画质+音轨, 否则单文件最佳。"""
+    """确定默认输出格式。
+
+    有 ffmpeg 时:
+    1. 优先 mp4 兼容组合 (H.264 + AAC), 保证任何播放器都有画面和声音;
+    2. 回退 bestvideo+bestaudio 由 yt-dlp 自动选择合适容器 (如 webm/mkv);
+    3. 最后单文件最佳。
+
+    避免默认选中 AV1/VP9 + Opus 的高画质组合 -- 这类格式在 mp4 容器中
+    很多播放器(尤其 macOS QuickTime)无法正常出声。
+    """
     if requested:
         return requested
     if shutil.which("ffmpeg"):
-        return "bestvideo*+bestaudio/best"
+        return (
+            "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]"
+            "/bestvideo+bestaudio/best"
+        )
     print(
         "提示: 未检测到 ffmpeg, 将使用单文件最佳画质(无独立音轨合并)。"
         "\n安装后质量更高:  brew install ffmpeg",
@@ -111,18 +124,28 @@ def resolve_format(requested: str | None) -> str:
     return "best"
 
 
-def make_progress_hook(quiet: bool) -> tuple[Callable[[dict], None], list[str]]:
-    """返回 (进度回调, 已完成视频标题列表)。"""
+def make_progress_hook(
+    quiet: bool,
+    metadata_write: Callable[[dict], None] | None = None,
+) -> tuple[Callable[[dict], None], list[str]]:
+    """返回 (进度回调, 已完成视频标题列表)。
+
+    yt-dlp 传给 progress hook 的字典中 info 位于 "info_dict" 键,
+    在 status == "finished" 时可通过其写入元数据。
+    """
     done: list[str] = []
     last_pct = {"v": 0.0}
 
     def hook(d: dict) -> None:
         if d.get("status") == "finished":
-            info = d.get("info", {})
+            info = d.get("info_dict", {}) or {}
             title = info.get("title") or Path(d.get("filename", "")).stem
-            done.append(title)
-            if not quiet:
-                print(f"  ✔ 已下载: {title}")
+            if title not in done:
+                done.append(title)
+                if not quiet:
+                    print(f"  ✔ 已下载: {title}")
+            if metadata_write is not None:
+                metadata_write(info)
             last_pct["v"] = 0.0
         elif d.get("status") == "downloading" and not quiet:
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
@@ -159,6 +182,45 @@ def make_metadata_writer(output_dir: Path) -> Callable[[dict], None]:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     return write
+
+
+def make_verify_hook(quiet: bool) -> Callable[[str], None]:
+    """合并完成后用 ffprobe 校验成品是否包含音频流 (签名接收文件路径)。
+
+    yt-dlp 的 post_hooks 回调参数是最终文件路径字符串。
+    防止下载中断/格式只含视频时把无声文件当成成品交付。
+    若无 ffprobe 则跳过校验。
+    """
+    if not shutil.which("ffprobe"):
+        return lambda filepath: None
+
+    def verify(filepath: str) -> None:
+        if not filepath or not Path(filepath).exists():
+            return
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "a",
+                    "-show_entries", "stream=index",
+                    "-of", "csv=p=0", filepath,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        if result.returncode == 0 and result.stdout.strip():
+            return
+        print(
+            f"\n⚠️ 警告: 文件未检测到音频流, 很可能是下载中断或格式不含音轨:"
+            f"\n  {filepath}"
+            "\n建议删除该文件后重新运行脚本。",
+            file=sys.stderr,
+        )
+
+    return verify
 
 
 def dry_run(url: str) -> int:
@@ -198,12 +260,15 @@ def run_download(args: argparse.Namespace) -> int:
     archive_path = args.archive or (output_dir / "archive.txt")
     fmt = resolve_format(args.format_)
 
-    progress_hook, done = make_progress_hook(args.quiet)
+    progress_hook, done = make_progress_hook(
+        args.quiet, make_metadata_writer(output_dir)
+    )
 
     opts: dict[str, Any] = {
         "format": fmt,
         "outtmpl": str(output_dir / "%(title)s [%(id)s].%(ext)s"),
-        "merge_output_format": "mp4" if "+" in fmt else None,
+        # 不强制容器: yt-dlp 会根据所选流自动选择 (h264+aac→mp4, vp9+opus→webm),
+        # 避免 opus 音频被塞进 mp4 导致部分播放器无声。
         "download_archive": str(archive_path),
         "continue_dl": True,
         "noplaylist": False,
@@ -214,7 +279,7 @@ def run_download(args: argparse.Namespace) -> int:
         "quiet": args.quiet,
         "no_warnings": args.quiet,
         "progress_hooks": [progress_hook],
-        "post_hooks": [make_metadata_writer(output_dir)],
+        "post_hooks": [make_verify_hook(args.quiet)],
         "cookiefile": str(args.cookies) if args.cookies else None,
         "limit_rate": args.limit_rate,
     }

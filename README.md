@@ -24,7 +24,7 @@ uv run python main.py
 | `-o, --output-dir` | 保存目录, 默认 `downloads/` |
 | `--limit N` | 只下载最新 N 个视频 |
 | `--dry-run` | 只列出所有视频, 不下载 |
-| `--format` | yt-dlp 格式表达式(默认有 ffmpeg 时合并最高画质) |
+| `--format` | yt-dlp 格式表达式(默认优先 H.264+AAC 的 mp4 兼容组合, 保证任何播放器有声音) |
 | `--cookies cookies.txt` | 年龄限制/登录验证时使用浏览器导出的 cookies |
 | `--archive` | 断点记录文件, 默认 `downloads/archive.txt`(重复运行自动跳过已下载) |
 | `--limit-rate 5M` | 限速下载 |
@@ -38,8 +38,9 @@ uv run python main.py
 
 ## 依赖系统工具
 
-- **ffmpeg** — 合成最高画质 + 音轨必需; 未安装时自动退化为单文件最佳画质
+- **ffmpeg** — 合成视频 + 音轨必需; 未安装时自动退化为单文件最佳画质
   - macOS: `brew install ffmpeg` / Windows: `winget install Gyan.FFmpeg` / Debian: `sudo apt install ffmpeg`
+- 下载完成后脚本会用 ffprobe 自动校验成品是否包含音频流, 防止无声视频
 
 ## 注意事项
 
