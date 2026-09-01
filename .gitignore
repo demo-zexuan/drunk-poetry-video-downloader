@@ -12,3 +12,4 @@ wheels/
 # Local stuff
 downloads/
 .uv-cache/
+.env
