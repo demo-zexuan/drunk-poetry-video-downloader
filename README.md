@@ -25,12 +25,12 @@ uv run python main.py
 | `--limit N` | 只下载最新 N 个视频 |
 | `--dry-run` | 只列出所有视频, 不下载 |
 | `--format` | yt-dlp 格式表达式(默认优先 H.264+AAC 的 mp4 兼容组合, 保证任何播放器有声音) |
-| `--cookies cookies.txt` | 年龄限制/登录验证时使用浏览器导出的 cookies |
+| `--cookies cookies.txt` | 年龄限制/会员视频时使用浏览器导出的 Netscape cookies |
+| `--cookies-from-browser chrome` | 直接从浏览器读取 cookies, 如 chrome/firefox/safari/edge |
+| `--username user@example.com` | YouTube 登录账号 |
+| `--password 123456` | YouTube 登录密码 |
 | `--archive` | 断点记录文件, 默认 `downloads/archive.txt`(重复运行自动跳过已下载) |
 | `--limit-rate 5M` | 限速下载 |
-| `--telegram-token <TOKEN>` | Telegram Bot Token(也读 `TELEGRAM_BOT_TOKEN`) |
-| `--telegram-chat <ID>` | 目标群聊 ID(也读 `TELEGRAM_CHAT_ID`) |
-| `--telegram-max-mb 50` | Telegram 上传上限(MB), 超过自动压缩后再发送 |
 | `-q` | 静默模式 |
 
 ## 输出
@@ -39,42 +39,30 @@ uv run python main.py
 - 断点记录: `downloads/archive.txt`(已下载的自动跳过)
 - 视频元数据: `downloads/metadata.jsonl`(每行一个 JSON: 标题、上传日期、时长、播放量等)
 
-## 自动发送到 Telegram 群聊
+## 登录下载会员/受限视频
 
-下载完成并通过音频校验后, 自动把视频发送到群聊, 评论格式为:
-
-```
-#视频归档 #<专题tag>
-```
-
-- `#视频归档` 固定
-- 第二个 tag 取自视频标题: 去掉开头的 `【小酒对瓶吹】` 后, 取其第一个分隔符(`：` 等)之前的短语
-  - 例: `【小酒对瓶吹】日本专题：xxx` → `#视频归档 #日本专题`
-  - 例: `【小酒对瓶吹】M05一期聊透：xxx` → `#视频归档 #M05一期聊透`
-
-启用方式(三选一):
+当 YouTube 视频要求登录、会员权限或年龄验证时, 可使用下面任一方式:
 
 ```bash
-# 1. 推荐: 项目根目录 .env 文件 (脚本启动时自动加载, 已加入 .gitignore)
-#    cp .env.example .env
-#    在 .env 中填写:
-#    TELEGRAM_BOT_TOKEN=<BOT_TOKEN>
-#    TELEGRAM_CHAT_ID=<CHAT_ID>
+# 方式 1: .env (推荐)
+#    在 .env 中写:
+#    YOUTUBE_USERNAME=your_account@example.com
+#    YOUTUBE_PASSWORD=your_password
+#    YOUTUBE_COOKIES_FROM_BROWSER=chrome
 
-# 2. 命令行参数
-uv run python main.py --telegram-token <BOT_TOKEN> --telegram-chat <CHAT_ID>
+# 方式 2: 命令行参数
+uv run python main.py --username your_account@example.com --password your_password
+uv run python main.py --cookies cookies.txt
+uv run python main.py --cookies-from-browser chrome
 
-# 3. 环境变量
-export TELEGRAM_BOT_TOKEN=<BOT_TOKEN>
-export TELEGRAM_CHAT_ID=<CHAT_ID>
+# 方式 3: 环境变量
+export YOUTUBE_USERNAME=your_account@example.com
+export YOUTUBE_PASSWORD=your_password
+export YOUTUBE_COOKIES_FROM_BROWSER=chrome
 uv run python main.py
 ```
 
-> 说明: Telegram Bot API 单文件上传上限默认 50MB; 超过时脚本会先用 ffmpeg
-> 自动压缩到限制内再上传(`--telegram-max-mb` 可调), 原始文件保持不变。
-> 需要先在 [@BotFather](https://t.me/BotFather) 创建 Bot 获取 Token, 并把 Bot
-> 加入目标群聊(群 ID 可用 [@userinfobot](https://t.me/userinfobot) 查询)。
-> 无音频流的残缺文件不会发送。
+> 说明: 从浏览器读取 cookies 一般最稳定; 若你已登录 YouTube 会员账号, 直接导出 Netscape cookies 文件或者让 yt-dlp 从浏览器 cookie 中读取更容易绕过会员/年龄限制。
 
 ## 依赖系统工具
 
@@ -82,7 +70,8 @@ uv run python main.py
   - macOS: `brew install ffmpeg` / Windows: `winget install Gyan.FFmpeg` / Debian: `sudo apt install ffmpeg`
 - 下载完成后脚本会用 ffprobe 自动校验成品是否包含音频流, 防止无声视频
 
-## 注意事项
+## 注意
 
-- YouTube 会限制频繁请求; 下载大量视频遇限流时可用 `--cookies` 传入登录 cookie。
+- YouTube 会限制频繁请求; 下载大量视频遇限流时可用 `--cookies` / `--cookies-from-browser` 传入登录 cookie。
+- 会员视频最稳妥的方式通常是使用浏览器 cookies, 例如 `--cookies-from-browser chrome` 或从浏览器导出 `cookies.txt` 后再下载。
 - 如需下载更多频道, 直接传频道地址: `uv run python main.py "https://www.youtube.com/@其他频道/videos"`。

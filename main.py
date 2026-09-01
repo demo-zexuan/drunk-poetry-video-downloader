@@ -1,4 +1,4 @@
-"""下载指定 YouTube 频道的全部视频(基于 yt-dlp), 并可自动发送到 Telegram 群聊。
+"""下载指定 YouTube 频道的全部视频(基于 yt-dlp), 支持会员/登录视频。
 
 用法示例:
     uv run python main.py                        # 下载 https://www.youtube.com/@DrunkPoetry/videos 下所有视频
@@ -6,10 +6,9 @@
     uv run python main.py --limit 5              # 只下载最新 5 个视频
     uv run python main.py -o ~/Videos/poetry     # 自定义保存目录
     uv run python main.py --cookies cookies.txt  # 遇到年龄限制/需要登录时传入浏览器导出的 cookies
-    uv run python main.py --telegram-token <TOKEN> --telegram-chat <CHAT_ID>
-                                                # 下载完成并校验通过后发送到 Telegram 群聊
-                                                # (也可用环境变量 TELEGRAM_BOT_TOKEN /
-                                                #  TELEGRAM_CHAT_ID)
+    uv run python main.py --cookies-from-browser chrome  # 直接从浏览器读取 cookies
+    uv run python main.py --username my@example.com --password 123456
+                                                # 账号登录后下载会员视频/受限内容
 """
 
 from __future__ import annotations
@@ -17,15 +16,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
-import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from telegram_bot import make_sender
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
@@ -100,12 +96,12 @@ def make_parser() -> argparse.ArgumentParser:
                         help="单个视频失败不中断, 继续下载其余视频")
     parser.add_argument("--dry-run", action="store_true",
                         help="只列出频道里的所有视频, 不下载")
-    parser.add_argument("--telegram-token", default=None,
-                        help="Telegram Bot Token; 也读取环境变量 TELEGRAM_BOT_TOKEN")
-    parser.add_argument("--telegram-chat", default=None,
-                        help="目标群聊/频道 ID; 也读取环境变量 TELEGRAM_CHAT_ID")
-    parser.add_argument("--telegram-max-mb", type=int, default=50,
-                        help="Telegram 单文件上传上限(MB), 超过时自动压缩再上传")
+    parser.add_argument("--username", default=None,
+                        help="YouTube 登录账号; 也读取环境变量 YOUTUBE_USERNAME")
+    parser.add_argument("--password", default=None,
+                        help="YouTube 登录密码; 也读取环境变量 YOUTUBE_PASSWORD")
+    parser.add_argument("--cookies-from-browser", default=None,
+                        help="浏览器 cookies: chrome, firefox, safari, edge 等; 也读取环境变量 YOUTUBE_COOKIES_FROM_BROWSER")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="关闭进度条和日志")
     return parser
@@ -222,81 +218,6 @@ def make_metadata_writer(output_dir: Path) -> Callable[[dict], None]:
     return write
 
 
-def _extract_video_id(filepath: str) -> str | None:
-    """从成品文件名 '标题 [id].ext' 中提取视频 id。"""
-    m = re.search(r"\[([A-Za-z0-9_-]+)\](?:\.[A-Za-z0-9]+)?$", filepath)
-    return m.group(1) if m else None
-
-
-def _title_from_path(filepath: str) -> str:
-    """从成品文件名中回退解析标题 (去掉 ' [id]' 后缀)。"""
-    stem = Path(filepath).stem
-    return re.sub(r"\s*\[[A-Za-z0-9_-]+\]$", "", stem)
-
-
-def make_verify_hook(
-    quiet: bool,
-    sender: Callable[[str, Path], tuple[bool, str]] | None = None,
-    info_store: dict[str, dict] | None = None,
-) -> Callable[[str], None]:
-    """合并完成后用 ffprobe 校验成品是否包含音频流 (签名接收文件路径)。
-
-    yt-dlp 的 post_hooks 回调参数是最终文件路径字符串。
-    防止下载中断/格式只含视频时把无声文件当成成品交付。
-    校验通过且配置了 Telegram sender 时, 自动把视频发送到群聊。
-    若无 ffprobe 则跳过校验(也不发送)。
-    """
-    if not shutil.which("ffprobe"):
-        return lambda filepath: None
-
-    def verify(filepath: str) -> None:
-        if not filepath or not Path(filepath).exists():
-            return
-        try:
-            result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-select_streams", "a",
-                    "-show_entries", "stream=index",
-                    "-of", "csv=p=0", filepath,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return
-        if result.returncode == 0 and result.stdout.strip():
-            # 校验通过: 有音频流才算完整, 此时才允许发送到 Telegram
-            if sender is not None:
-                _send_after_verify(filepath, sender, info_store)
-            return
-        print(
-            f"\n⚠️ 警告: 文件未检测到音频流, 很可能是下载中断或格式不含音轨:"
-            f"\n  {filepath}"
-            "\n建议删除该文件后重新运行脚本(校验未通过, 不会发送到 Telegram)。",
-            file=sys.stderr,
-        )
-
-    return verify
-
-
-def _send_after_verify(
-    filepath: str,
-    sender: Callable[[str, Path], tuple[bool, str]],
-    info_store: dict[str, dict] | None,
-) -> None:
-    """校验通过后调用 Telegram 发送; 失败仅告警, 不影响下载流程。"""
-    vid = _extract_video_id(filepath)
-    info = (info_store or {}).get(vid, {}) if vid else {}
-    title = info.get("title") or _title_from_path(filepath)
-    ok, err = sender(title, Path(filepath))
-    if ok:
-        print(f"  📮 已发送到 Telegram: {title}")
-    else:
-        print(f"\n⚠️ Telegram 发送失败: {err}", file=sys.stderr)
-
-
 def dry_run(url: str) -> int:
     """列出频道所有视频, 不下载。"""
     opts = {
@@ -334,26 +255,17 @@ def run_download(args: argparse.Namespace) -> int:
     archive_path = args.archive or (output_dir / "archive.txt")
     fmt = resolve_format(args.format_)
 
-    # I. Telegram 配置 (命令行参数优先, 其次环境变量)
-    token = args.telegram_token or os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = args.telegram_chat or os.environ.get("TELEGRAM_CHAT_ID")
-    sender = None
-    if token and chat_id:
-        sender = make_sender(
-            token, chat_id, args.telegram_max_mb * 1024 * 1024
-        )
-        print(
-            f"Telegram 通知已启用: 群聊 {chat_id} "
-            f"(单文件上限 {args.telegram_max_mb} MB)"
-        )
-    else:
-        print(
-            "提示: 未配置 Telegram, 下载完成后不会发送到群聊。"
-            "可用 --telegram-token/--telegram-chat 或环境变量"
-            " TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 启用。"
-        )
+    username = args.username or os.environ.get("YOUTUBE_USERNAME")
+    password = args.password or os.environ.get("YOUTUBE_PASSWORD")
+    cookies_from_browser = (
+        args.cookies_from_browser
+        or os.environ.get("YOUTUBE_COOKIES_FROM_BROWSER")
+        or os.environ.get("YOUTUBE_COOKIES")
+    )
 
-    # II. 钩子: 进度(记录信息/写 metadata) + 校验(音频检查/发送)
+    if username or password or cookies_from_browser:
+        print("登录信息已配置: 将尝试以账号/浏览器 cookie 方式下载受限视频。")
+
     info_store: dict[str, dict] = {}
     progress_hook, done = make_progress_hook(
         args.quiet,
@@ -364,8 +276,6 @@ def run_download(args: argparse.Namespace) -> int:
     opts: dict[str, Any] = {
         "format": fmt,
         "outtmpl": str(output_dir / "%(title)s [%(id)s].%(ext)s"),
-        # 不强制容器: yt-dlp 会根据所选流自动选择 (h264+aac→mp4, vp9+opus→webm),
-        # 避免 opus 音频被塞进 mp4 导致部分播放器无声。
         "download_archive": str(archive_path),
         "continue_dl": True,
         "noplaylist": False,
@@ -376,8 +286,10 @@ def run_download(args: argparse.Namespace) -> int:
         "quiet": args.quiet,
         "no_warnings": args.quiet,
         "progress_hooks": [progress_hook],
-        "post_hooks": [make_verify_hook(args.quiet, sender, info_store)],
         "cookiefile": str(args.cookies) if args.cookies else None,
+        "cookiesfrombrowser": cookies_from_browser,
+        "username": username,
+        "password": password,
         "limit_rate": args.limit_rate,
     }
 
