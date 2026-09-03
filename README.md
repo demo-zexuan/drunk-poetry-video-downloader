@@ -26,7 +26,8 @@ uv run python main.py
 | `--dry-run` | 只列出所有视频, 不下载 |
 | `--format` | yt-dlp 格式表达式(默认优先 H.264+AAC 的 mp4 兼容组合, 保证任何播放器有声音) |
 | `--cookies cookies.txt` | 年龄限制/会员视频时使用浏览器导出的 Netscape cookies |
-| `--cookies-from-browser chrome` | 直接从浏览器读取 cookies, 如 chrome/firefox/safari/edge |
+| `--cookies-from-browser chrome` | 直接从浏览器读取 cookies, 如 chrome/firefox/safari/edge；可写 `chrome:Default` 指定 profile |
+| `--members-only` | 仅下载会员专属视频(availability=subscriber_only), 其余自动跳过 |
 | `--username user@example.com` | YouTube 登录账号 |
 | `--password 123456` | YouTube 登录密码 |
 | `--archive` | 断点记录文件, 默认 `downloads/archive.txt`(重复运行自动跳过已下载) |
@@ -54,6 +55,8 @@ uv run python main.py
 uv run python main.py --username your_account@example.com --password your_password
 uv run python main.py --cookies cookies.txt
 uv run python main.py --cookies-from-browser chrome
+uv run python main.py --cookies-from-browser chrome:Default
+uv run python main.py --cookies-from-browser chrome --members-only
 
 # 方式 3: 环境变量
 export YOUTUBE_USERNAME=your_account@example.com
@@ -74,4 +77,45 @@ uv run python main.py
 
 - YouTube 会限制频繁请求; 下载大量视频遇限流时可用 `--cookies` / `--cookies-from-browser` 传入登录 cookie。
 - 会员视频最稳妥的方式通常是使用浏览器 cookies, 例如 `--cookies-from-browser chrome` 或从浏览器导出 `cookies.txt` 后再下载。
+- 若只想下载会员专属内容, 请加 `--members-only`; 未标记为 `subscriber_only` 的视频会自动跳过。
+- 若浏览器 cookie 读取失败, 可在 `.env` 设置 `YOUTUBE_COOKIES_FILE=/绝对路径/cookies.txt`，或命令行用 `--cookies cookies.txt`。
 - 如需下载更多频道, 直接传频道地址: `uv run python main.py "https://www.youtube.com/@其他频道/videos"`。
+
+## 用 Telegram 个人账号发送视频 (独立脚本)
+
+脚本: `send_video_user.py`。该脚本与下载主流程分离，仅负责发送本地视频。
+
+- 使用 Telegram **个人账号** 登录发送，不使用 Bot Token
+- 默认扫描 `downloads/` 目录并按修改时间从旧到新发送
+- 评论格式固定: `#视频归档 #视频标题`
+- `#视频标题` 会从文件名提取，自动去掉 `【】` 中内容，并清理为 hashtag 可用字符
+
+先在 `.env` 配置:
+
+```dotenv
+TELEGRAM_API_ID=123456
+TELEGRAM_API_HASH=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TELEGRAM_CHAT=@your_target_or_chat_id
+TELEGRAM_SESSION=telegram_user
+```
+
+首次运行会要求输入手机号/验证码登录(并保存 session):
+
+```bash
+uv sync
+uv run python send_video_user.py --dry-run
+uv run python send_video_user.py
+```
+
+常见用法:
+
+```bash
+# 发送指定目录
+uv run python send_video_user.py downloads
+
+# 发送指定文件
+uv run python send_video_user.py "downloads/xxx.mp4"
+
+# 只发送前 3 个
+uv run python send_video_user.py --limit 3
+```

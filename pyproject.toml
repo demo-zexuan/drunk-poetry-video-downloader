@@ -5,5 +5,6 @@ description = "Download all videos from a YouTube channel (DrunkPoetry) with yt-
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "telethon>=1.39.0",
     "yt-dlp>=2026.8.19",
 ]

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from yt_dlp import YoutubeDL
+from yt_dlp.cookies import CookieLoadError
 from yt_dlp.utils import DownloadError
 
 DEFAULT_URL = "https://www.youtube.com/@DrunkPoetry/videos"
@@ -102,9 +103,49 @@ def make_parser() -> argparse.ArgumentParser:
                         help="YouTube 登录密码; 也读取环境变量 YOUTUBE_PASSWORD")
     parser.add_argument("--cookies-from-browser", default=None,
                         help="浏览器 cookies: chrome, firefox, safari, edge 等; 也读取环境变量 YOUTUBE_COOKIES_FROM_BROWSER")
+    parser.add_argument("--members-only", action="store_true",
+                        help="仅下载会员专属视频(availability=subscriber_only), 其余视频会被跳过")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="关闭进度条和日志")
     return parser
+
+
+def make_members_only_filter(enabled: bool) -> Callable[..., str | None] | None:
+    """构造 yt-dlp match_filter: 仅保留会员专属视频。"""
+    if not enabled:
+        return None
+
+    def _filter(info: dict, *, incomplete: bool = False) -> str | None:
+        availability = info.get("availability")
+        if incomplete and availability is None:
+            return None
+        if availability == "subscriber_only":
+            return None
+
+        # 严格模式: 仅下载已明确标记为会员专属的视频。
+        # availability 为空或其他值都视为非目标，直接跳过。
+        title = info.get("title") or info.get("id") or "<unknown>"
+        return f"非会员专属视频，已跳过: {title} (availability={availability!r})"
+
+    return _filter
+
+
+def parse_cookies_from_browser(value: str | None) -> tuple[str, str | None, str | None, str | None] | None:
+    """把字符串规格转换为 yt-dlp Python API 需要的 tuple。
+
+    支持格式: browser[:profile[:keyring[:container]]]
+    例如: chrome, chrome:Default
+    """
+    if not value:
+        return None
+    parts = [p.strip() for p in value.split(":", 3)]
+    browser = parts[0]
+    if not browser:
+        return None
+    profile = parts[1] if len(parts) > 1 and parts[1] else None
+    keyring = parts[2] if len(parts) > 2 and parts[2] else None
+    container = parts[3] if len(parts) > 3 and parts[3] else None
+    return (browser, profile, keyring, container)
 
 
 def load_dotenv(path: Path | None = None) -> None:
@@ -161,8 +202,7 @@ def make_progress_hook(
     """返回 (进度回调, 已完成视频标题列表)。
 
     yt-dlp 传给 progress hook 的字典中 info 位于 "info_dict" 键,
-    在 status == "finished" 时可通过其写入元数据, 并按 id 缓存
-    完整 info (供后续 Telegram 发送时解析标题使用)。
+    在 status == "finished" 时可写入元数据, 并按 id 缓存完整 info。
     """
     done: list[str] = []
     last_pct = {"v": 0.0}
@@ -262,15 +302,18 @@ def run_download(args: argparse.Namespace) -> int:
         or os.environ.get("YOUTUBE_COOKIES_FROM_BROWSER")
         or os.environ.get("YOUTUBE_COOKIES")
     )
+    cookiefile = args.cookies or os.environ.get("YOUTUBE_COOKIES_FILE")
 
     if username or password or cookies_from_browser:
         print("登录信息已配置: 将尝试以账号/浏览器 cookie 方式下载受限视频。")
 
-    info_store: dict[str, dict] = {}
+    if args.members_only:
+        print("会员过滤已启用: 仅下载会员专属视频 (subscriber_only)。")
+
     progress_hook, done = make_progress_hook(
         args.quiet,
         make_metadata_writer(output_dir),
-        info_store,
+        None,
     )
 
     opts: dict[str, Any] = {
@@ -286,10 +329,11 @@ def run_download(args: argparse.Namespace) -> int:
         "quiet": args.quiet,
         "no_warnings": args.quiet,
         "progress_hooks": [progress_hook],
-        "cookiefile": str(args.cookies) if args.cookies else None,
-        "cookiesfrombrowser": cookies_from_browser,
+        "cookiefile": str(cookiefile) if cookiefile else None,
+        "cookiesfrombrowser": parse_cookies_from_browser(cookies_from_browser),
         "username": username,
         "password": password,
+        "match_filter": make_members_only_filter(args.members_only),
         "limit_rate": args.limit_rate,
     }
 
@@ -303,11 +347,25 @@ def run_download(args: argparse.Namespace) -> int:
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(args.url, download=True)
+    except CookieLoadError as exc:
+        print(f"\nCookie 加载失败: {exc}", file=sys.stderr)
+        print(
+            "建议排查:"
+            "\n1) 关闭所有 Chrome 窗口后重试"
+            "\n2) 显式指定 profile，例如 --cookies-from-browser chrome:Default"
+            "\n3) 改用导出的 Netscape cookies 文件: --cookies cookies.txt"
+            "\n4) 或在 .env 设置 YOUTUBE_COOKIES_FILE=/绝对路径/cookies.txt",
+            file=sys.stderr,
+        )
+        return 1
     except DownloadError as exc:
         print(f"\n下载失败: {exc}", file=sys.stderr)
         return 1
 
     if info is None:
+        if args.members_only:
+            print("\n完成: 未命中可下载的会员专属视频(可能当前列表无会员内容或账号无权限)。")
+            return 0
         print(f"\n下载失败: 无法解析地址 {args.url}", file=sys.stderr)
         return 1
 
